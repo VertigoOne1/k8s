@@ -1,8 +1,8 @@
-# Setup Kubernetes on a NUC/VM
+# Setup Kubernetes on a NUC
 
 ## Base
 
-Standard minimal Ubuntu focal, but it will work on yammy
+Standard minimal Ubuntu focal, but it will work on jammy
 
 Patched to latest as at 07/11/2022
 
@@ -14,7 +14,7 @@ Pass: install
 
 ## Expectation
 
-Clean Ubuntu Focal/Jammy
+Clean Ubuntu focal/jammy
 Internet Access
 
 ```
@@ -125,7 +125,7 @@ sudo apt-get update
 
 ### Install k8s tooling
 
-#### Install at iotnxt supported versions
+#### Install at our current supported versions, change as necessary
 
 ```
 sudo apt-get install -y kubelet=1.21.14-00 kubeadm=1.21.14-00 kubectl=1.21.14-00
@@ -174,7 +174,7 @@ NAME     STATUS     ROLES                  AGE     VERSION
 nucemu   NotReady   control-plane,master   4m43s   v1.21.14
 ```
 
-### Convert to single node cluster, so it can run vraptor pods as a single thing
+### Convert to single node cluster, so it can run workload pods on itself
 
 ```
 kubectl taint nodes --all node-role.kubernetes.io/master-
@@ -214,8 +214,6 @@ Verify the node goes ready
 ```
 kubectl get nodes
 ```
-
-Must appear ready
 
 ```
 root@nucemu:/home/install# kubectl get nodes
@@ -270,7 +268,7 @@ helm repo add metallb https://metallb.github.io/metallb
 helm -n metallb-system install metallb metallb/metallb --create-namespace
 ```
 
-#### Configure ip's for metallb use (expose the vraptor)
+#### Configure ip's for metallb use (for exposing of services)
 
 Specify the IP block/ip's for metallb to use for exposing pods
 
@@ -279,7 +277,7 @@ cat <<EOF | sudo tee metallb-config.yaml
 apiVersion: metallb.io/v1beta2
 kind: IPAddressPool
 metadata:
-  name: vraptor-pool
+  name: storage-pool
   namespace: metallb-system
 spec:
   addresses:
@@ -315,4 +313,115 @@ metallb-system     metallb-speaker-jvgpv                      1/1     Running   
 tigera-operator    tigera-operator-7f589df4bf-hpgvj           1/1     Running   0          51m
 ```
 
-### Ready for vraptor deployment and adding to rancher
+### Ready for workload deployment and adding to rancher
+
+clusters sometimes needs storage, your options for a single node cluster is localhost nfs, or local provisioner/no-provisioner
+
+#### Local provisioner
+
+```
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.23/deploy/local-path-storage.yaml
+```
+
+further steps are beyond the scope of this readme, as the workload needs to be configured specifically for it
+
+#### NFS provisioner
+
+Simpler overall, but requires some extra OS steps to be done (setup a nfs server), but allows dynamic volume creation (storage class support, which makes workload deployment easier, and you can move things around easily, add external NFS storage)
+
+OS Side
+
+```
+sudo apt install -y nfs-kernel-server nfs-common
+```
+
+```
+sudo mkdir /k8s-nfs -p
+sudo chown nobody:nogroup /k8s-nfs
+```
+
+```
+echo "/k8s-nfs    127.0.0.1(rw,async,no_subtree_check,no_root_squash)" >> /etc/exports
+sudo systemctl restart nfs-kernel-server
+```
+
+```
+helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
+helm -n nfs-provisioner install nfs-subdir-external-provisioner nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
+    --set nfs.server=localhost \
+    --set nfs.path=/k8s-nfs \
+    --create-namespace
+```
+
+Verify
+
+```
+kubectl get sc
+
+NAME         PROVISIONER                                     RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION   AGE
+nfs-client   cluster.local/nfs-subdir-external-provisioner   Delete          Immediate           true                   110s
+```
+
+Create a storage class for it
+
+```
+cat <<EOF | sudo tee sc-storage.yaml
+allowVolumeExpansion: true
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-storage
+parameters:
+  archiveOnDelete: "true"
+provisioner: cluster.local/nfs-subdir-external-provisioner
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+EOF
+```
+
+```
+kubectl apply -f sc-storage.yaml
+```
+
+verify
+
+```
+kubectl get sc
+
+NAME         PROVISIONER                                     RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION   AGE
+nfs-client   cluster.local/nfs-subdir-external-provisioner   Delete          Immediate           true                   4m11s
+raptor4      cluster.local/nfs-subdir-external-provisioner   Delete          Immediate           true                   2s
+```
+
+good to go, we'll know when we deploy workload
+
+### State at this point
+
+Can create workloads
+can be joined to rancher
+can store data persistently using storage class
+reboot tested, able to come up again
+
+Pod status
+
+```
+root@nucemu:/home/install# kubectl get pods -A
+NAMESPACE          NAME                                              READY   STATUS    RESTARTS   AGE
+calico-apiserver   calico-apiserver-c47c9fbcb-2p9p2                  1/1     Running   1          68m
+calico-apiserver   calico-apiserver-c47c9fbcb-cfdkk                  1/1     Running   1          68m
+calico-system      calico-kube-controllers-55dc8fbb6d-vwrf5          1/1     Running   1          70m
+calico-system      calico-node-5np94                                 1/1     Running   1          70m
+calico-system      calico-typha-6b988667c5-kvttx                     1/1     Running   2          70m
+calico-system      csi-node-driver-gh6cs                             2/2     Running   2          68m
+kube-system        coredns-558bd4d5db-dr4kx                          1/1     Running   1          111m
+kube-system        coredns-558bd4d5db-ssftx                          1/1     Running   1          111m
+kube-system        etcd-nucemu                                       1/1     Running   1          112m
+kube-system        kube-apiserver-nucemu                             1/1     Running   1          112m
+kube-system        kube-controller-manager-nucemu                    1/1     Running   1          112m
+kube-system        kube-proxy-96l64                                  1/1     Running   1          111m
+kube-system        kube-scheduler-nucemu                             1/1     Running   1          112m
+metallb-system     metallb-controller-5b98846878-cgdmw               1/1     Running   1          59m
+metallb-system     metallb-speaker-jvgpv                             1/1     Running   2          59m
+nfs-provisioner    nfs-subdir-external-provisioner-b9859bf55-kkmfz   1/1     Running   1          8m41s
+tigera-operator    tigera-operator-7f589df4bf-hpgvj                  1/1     Running   2          109m
+```
